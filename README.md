@@ -1,17 +1,6 @@
-Certainly! Let's create the Supertrend indicator calculation manually without using the `pandas-ta` library. We will plot and update the chart every 10 seconds with new data.
+Let's correct the implementation to ensure the Supertrend is correctly plotted. I'll modify the code to ensure both the Close price and Supertrend are displayed properly and make sure the lines for the Supertrend are plotted continuously.
 
-Here's how you can do it:
-
-1. Define the Supertrend calculation function.
-2. Use `matplotlib.animation` to update the plot every 10 seconds without clearing the previous plot.
-
-First, install the necessary libraries:
-
-```sh
-pip install pandas numpy matplotlib
-```
-
-Here's the complete code:
+Here is the updated code:
 
 ```python
 import pandas as pd
@@ -22,7 +11,7 @@ from matplotlib.animation import FuncAnimation
 # Function to generate new data from the simulator
 def get_new_data():
     new_data = {
-        'Date': pd.date_range(start='2022-01-01', periods=10, freq='D'),
+        'Date': pd.date_range(start=pd.Timestamp.now(), periods=10, freq='S'),
         'High': np.random.rand(10) * 100 + 100,
         'Low': np.random.rand(10) * 100,
         'Close': np.random.rand(10) * 100 + 50
@@ -93,15 +82,12 @@ def update(frame):
     line_close.set_data(df.index, df['Close'])
     line_supertrend.set_data(df.index, df['Supertrend'])
     
-    # Highlighting uptrends and downtrends
-    for i in range(1, len(df)):
-        if df['In Uptrend'].iloc[i]:
-            ax.plot(df.index[i-1:i+1], df['Supertrend'].iloc[i-1:i+1], color='green')
-        else:
-            ax.plot(df.index[i-1:i+1], df['Supertrend'].iloc[i-1:i+1], color='red')
-    
+    ax.relim()
+    ax.autoscale_view()
+
+    # Clear and redraw to show updated lines
     ax.set_xlim(df.index.min(), df.index.max())
-    ax.set_ylim(min(df['Low'].min(), df['Supertrend'].min()), max(df['High'].max(), df['Supertrend'].max()))
+    ax.set_ylim(df['Low'].min() * 0.95, df['High'].max() * 1.05)
     ax.set_title('Supertrend Indicator')
     ax.set_xlabel('Date')
     ax.set_ylabel('Price')
@@ -113,10 +99,10 @@ ani = FuncAnimation(fig, update, interval=10000)  # Update every 10 seconds
 plt.show()
 ```
 
-In this code:
-1. `get_new_data` simulates new data retrieval.
-2. `calculate_supertrend` manually calculates the Supertrend indicator.
-3. The `update` function appends new data, calculates the Supertrend, and updates the plot without clearing previous data.
-4. `FuncAnimation` updates the plot every 10 seconds.
+In this updated code:
+1. `calculate_supertrend` manually calculates the Supertrend indicator.
+2. The `update` function appends new data, calculates the Supertrend, and updates the plot.
+3. The plot lines are initialized outside the update function and updated with new data inside the update function.
+4. The axes limits are recalculated and rescaled using `ax.relim()` and `ax.autoscale_view()` to fit the new data.
 
-Replace `get_new_data` with your actual simulator data retrieval function to use this setup in your application.
+This setup should correctly plot and update both the Close price and the Supertrend indicator continuously without clearing the previous data.
