@@ -1,52 +1,169 @@
-The `freq` parameter in the `pd.date_range` function from the pandas library specifies the frequency of the date intervals in the generated date range. It determines how often dates should be generated between the start and end dates.
+To handle more than 100 unique calculations simultaneously using microservices, you can take advantage of concurrent processing and distributed computing. Here's how you can scale your microservices architecture to achieve this:
 
-### Common Frequency Strings:
+1. **Parallel Processing**: Use Python's `concurrent.futures` or similar libraries to parallelize the calculations.
+2. **Distributed Microservices**: Deploy multiple instances of your microservices using a container orchestration system like Kubernetes.
+3. **Load Balancing**: Use a load balancer to distribute incoming requests across multiple service instances.
+4. **Messaging with Kafka**: Use Kafka to handle message queues and distribute tasks among multiple microservices.
 
-- `'D'`: Daily frequency (e.g., every day).
-- `'B'`: Business day frequency (e.g., weekdays only).
-- `'W'`: Weekly frequency.
-- `'M'`: Month-end frequency.
-- `'H'`: Hourly frequency.
-- `'T'` or `'min'`: Minute frequency.
-- `'S'`: Second frequency.
+Below is an example demonstrating how to implement parallel processing and Kafka for distributing the workload across multiple microservices.
 
-### Example in the Code
+### 1. Technical Indicator Modules
 
-In the given function `generate_initial_price_data`, the `freq='D'` parameter is used:
-
+#### `oscillator.py`
 ```python
-def generate_initial_price_data(num_days=100, seed=42):
-    np.random.seed(seed)
-    dates = pd.date_range(start='2022-01-01', periods=num_days, freq='D')
-    data = {
-        'Open': np.random.uniform(low=100, high=200, size=num_days),
-        'High': np.random.uniform(low=100, high=200, size=num_days),
-        'Low': np.random.uniform(low=100, high=200, size=num_days),
-        'Close': np.random.uniform(low=100, high=200, size=num_days),
-    }
-    df = pd.DataFrame(data, index=dates)
-    return df
+import pandas as pd
+import numpy as np
+
+class StochasticOscillator:
+    def __init__(self, period=14):
+        self.period = period
+
+    def calculate(self, high_prices, low_prices, close_prices):
+        high = np.array(high_prices)
+        low = np.array(low_prices)
+        close = np.array(close_prices)
+
+        lowest_low = pd.Series(low).rolling(window=self.period, min_periods=self.period).min()
+        highest_high = pd.Series(high).rolling(window=self.period, min_periods=self.period).max()
+        k_percent = 100 * ((close - lowest_low) / (highest_high - lowest_low))
+        d_percent = k_percent.rolling(window=3).mean()
+
+        return k_percent, d_percent
 ```
 
-### Explanation:
+### 2. Flask Microservices
 
-- `start='2022-01-01'`: Specifies the starting date of the range.
-- `periods=num_days`: Specifies the number of periods (days) to generate.
-- `freq='D'`: Specifies that the frequency of the date range should be daily.
+#### `microservice_1.py` (Producer)
+This service sends stock data to Kafka.
 
-### Generated Date Range
+```python
+from flask import Flask, request, jsonify
+from kafka import KafkaProducer
+import json
+import pandas as pd
 
-With `freq='D'`, if `num_days=100`, the date range will consist of 100 consecutive days starting from '2022-01-01'. The resulting dates would be '2022-01-01', '2022-01-02', '2022-01-03', ..., up to '2022-04-10'.
+app = Flask(__name__)
 
-### Importance in the Context:
+producer = KafkaProducer(bootstrap_servers='localhost:9092', value_serializer=lambda v: json.dumps(v).encode('utf-8'))
 
-- The `freq='D'` parameter ensures that each row in the generated DataFrame corresponds to a single day, which is typical for daily financial data such as stock prices.
-- Using different frequencies (e.g., `'B'` for business days or `'H'` for hourly data) would adjust the generated date intervals accordingly, allowing for different types of time series data generation.
+@app.route('/send', methods=['POST'])
+def send_message():
+    data = request.get_json()
+    company_id = data.get('company_id')
+    file_path = data.get('file_path')
+    
+    # Read CSV file
+    df = pd.read_csv(file_path)
+    
+    # Send each row to Kafka
+    for _, row in df.iterrows():
+        message = row.to_dict()
+        message['company_id'] = company_id
+        producer.send('stock_topic', message)
+    
+    return jsonify({'status': 'Messages sent to Kafka'}), 200
 
-### Practical Implications:
+if __name__ == "__main__":
+    app.run(port=5001)
+```
 
-- **Daily Data**: Suitable for most stock price simulations, as stock prices are typically recorded daily.
-- **Business Days**: Useful for financial markets where data is only recorded on weekdays.
-- **Hourly or Minute Data**: Can be used for high-frequency trading simulations or more granular data analysis.
+#### `microservice_2.py` (Consumer)
+This service receives stock data from Kafka and calculates the indicators.
 
-By setting `freq='D'`, the script is configured to simulate daily stock prices, which is a common requirement in financial data analysis and trading strategy simulations.
+```python
+from flask import Flask, jsonify
+from kafka import KafkaConsumer
+from concurrent.futures import ThreadPoolExecutor
+import json
+import pandas as pd
+import numpy as np
+from oscillator import StochasticOscillator
+
+app = Flask(__name__)
+
+consumer = KafkaConsumer(
+    'stock_topic',
+    bootstrap_servers='localhost:9092',
+    auto_offset_reset='earliest',
+    enable_auto_commit=True,
+    group_id='my-group',
+    value_deserializer=lambda x: json.loads(x.decode('utf-8'))
+)
+
+executor = ThreadPoolExecutor(max_workers=10)
+results = []
+
+def calculate_indicators(data):
+    # Assuming data is a dictionary with keys: High, Low, Close, company_id
+    df = pd.DataFrame([data])
+    df['High'] = df['High'].astype(float)
+    df['Low'] = df['Low'].astype(float)
+    df['Close'] = df['Close'].astype(float)
+    
+    # Calculate Stochastic Oscillator
+    stochastic_oscillator = StochasticOscillator()
+    k_percent, d_percent = stochastic_oscillator.calculate(df['High'], df['Low'], df['Close'])
+    
+    result = {
+        'company_id': data['company_id'],
+        'Stochastic %K': k_percent.tolist(),
+        'Stochastic %D': d_percent.tolist()
+    }
+    return result
+
+@app.route('/receive', methods=['GET'])
+def receive_messages():
+    futures = []
+    for message in consumer:
+        data = message.value
+        futures.append(executor.submit(calculate_indicators, data))
+        
+        if len(futures) >= 100:
+            break
+
+    global results
+    results = [future.result() for future in futures]
+    return jsonify(results), 200
+
+if __name__ == "__main__":
+    app.run(port=5002)
+```
+
+### 3. Install Dependencies
+Install the necessary Python packages using pip:
+```sh
+pip install flask kafka-python pandas numpy concurrent.futures
+```
+
+### 4. Run the Microservices
+Start the two Flask microservices in separate terminal windows:
+
+```sh
+python microservice_1.py
+```
+
+```sh
+python microservice_2.py
+```
+
+### 5. Sending and Receiving Messages
+Send messages to `microservice_1` to distribute tasks to Kafka and calculate indicators using `microservice_2`.
+
+#### Send a message to `microservice_1`:
+```sh
+curl -X POST -H "Content-Type: application/json" -d '{"company_id": 1, "file_path": "data_company_a.csv"}' http://localhost:5001/send
+```
+
+#### Receive and calculate indicators from `microservice_2`:
+```sh
+curl http://localhost:5002/receive
+```
+
+### Notes:
+1. **Kafka Topics**: Ensure the Kafka topic (`stock_topic` in this example) exists. You can create it using Kafka CLI tools.
+2. **Kafka Configuration**: Adjust `bootstrap_servers` and other Kafka configurations as per your setup.
+3. **Parallel Processing**: The `ThreadPoolExecutor` is used for parallel processing. Adjust the `max_workers` parameter based on your system's capacity.
+4. **Scaling with Kubernetes**: For a production setup, consider using Kubernetes to deploy and manage multiple instances of your microservices for scalability and fault tolerance.
+5. **Load Balancing**: Use a load balancer to distribute incoming requests across multiple instances of your microservices.
+
+This setup allows you to handle more than 100 unique calculations simultaneously by distributing tasks across multiple instances of your microservices and processing them in parallel.
