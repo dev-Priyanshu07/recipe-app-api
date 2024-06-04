@@ -1,0 +1,122 @@
+Here's the code with explanations for each part, demonstrating the use of Kafka for real-time technical indicator processing:
+
+**1. WebSocket Data Producer (websocket_producer.py):**
+
+```python
+import json
+from websockets import connect
+from confluent_kafka import Producer
+
+# Producer configuration (replace with your details)
+producer = Producer({
+    'bootstrap.servers': 'localhost:9092',
+})
+
+async def handle_websocket(uri):
+    async with connect(uri) as websocket:
+        async for message in websocket:
+            data = json.loads(message)
+            # Extract relevant data
+            timestamp = data["timestamp"]
+            open_price = data["open"]
+            low_price = data["low"]
+            high_price = data["high"]
+            close_price = data["close"]
+
+            # Prepare data for Kafka
+            stock_data = {
+                "timestamp": timestamp,
+                "open": open_price,
+                "low": low_price,
+                "high": high_price,
+                "close": close_price
+            }
+
+            # Publish data to Kafka topic (stock_data_raw)
+            producer.produce('stock_data_raw', json.dumps(stock_data).encode('utf-8'))
+            producer.poll(0)  # Flush outstanding deliveries
+
+# Example usage (replace with your actual WebSocket URL)
+websocket_uri = "ws://your-websocket-server.com/stock-data"
+
+async def main():
+    await handle_websocket(websocket_uri)
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```
+
+**Explanation:**
+
+* This script establishes a WebSocket connection and retrieves stock data.
+* It extracts relevant data points (timestamp, open, high, low, close).
+* A Kafka producer is created with your server configuration.
+* The script serializes the stock data into JSON format.
+* It publishes the data to the "stock_data_raw" topic in Kafka.
+
+**2. Technical Indicator Processor (indicator_processor.py):**
+
+```python
+from confluent_kafka import Consumer
+from ta import macd, rsi  # Example technical indicators using TA library
+
+# Consumer configuration (replace with your details)
+consumer = Consumer({
+    'bootstrap.servers': 'localhost:9092',
+    'group.id': 'indicator-processor-group',
+    'auto.offset.reset': 'earliest'
+})
+
+def calculate_indicators(data):
+    # Extract relevant data for indicator calculations
+    timestamp = data["timestamp"]
+    close_price = data["close"]
+    
+    # Calculate technical indicators using TA library (replace with your desired indicators)
+    macd_result = macd(close_price)
+    macd = macd_result[1]  # Extract MACD line
+    signal = macd_result[2]  # Extract signal line
+    rsi_value = rsi(close_price)
+
+    # Prepare indicator data for Kafka
+    indicators = {
+        "timestamp": timestamp,
+        "MACD": macd,
+        "signal": signal,
+        "RSI": rsi_value
+    }
+    return indicators
+
+def process_data(message):
+    try:
+        data = json.loads(message.value().decode('utf-8'))
+        indicators = calculate_indicators(data)
+
+        # Publish indicators to separate Kafka topics (replace with your topic names)
+        producer.produce('indicators_1m', json.dumps(indicators).encode('utf-8'))
+        producer.poll(0)  # Flush outstanding deliveries
+
+    except Exception as e:
+        print(f"Error processing message: {e}")
+
+# Subscribe to the raw data topic (stock_data_raw)
+consumer.subscribe(['stock_data_raw'])
+
+if __name__ == "__main__":
+    while True:
+        msg = consumer.poll(1.0)  # Timeout of 1 second
+        if msg is None:
+            continue
+        elif msg.error():
+            print(f"Consumer error: {msg.error()}")
+        else:
+            process_data(msg)
+```
+
+**Explanation:**
+
+* This script creates a Kafka consumer to subscribe to the "stock_data_raw" topic.
+* It defines a `calculate_indicators` function that extracts relevant data and uses the `ta` library (replace with your preferred library) to calculate technical indicators (MACD and RSI in this example).
+* The function prepares a dictionary containing the timestamp and calculated indicator values.
+* The script uses a separate Kafka producer (not
