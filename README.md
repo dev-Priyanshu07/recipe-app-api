@@ -1,169 +1,90 @@
-To handle more than 100 unique calculations simultaneously using microservices, you can take advantage of concurrent processing and distributed computing. Here's how you can scale your microservices architecture to achieve this:
+Sure, I will modify the class to return only the Supertrend values without the direction. Here's the updated code:
 
-1. **Parallel Processing**: Use Python's `concurrent.futures` or similar libraries to parallelize the calculations.
-2. **Distributed Microservices**: Deploy multiple instances of your microservices using a container orchestration system like Kubernetes.
-3. **Load Balancing**: Use a load balancer to distribute incoming requests across multiple service instances.
-4. **Messaging with Kafka**: Use Kafka to handle message queues and distribute tasks among multiple microservices.
-
-Below is an example demonstrating how to implement parallel processing and Kafka for distributing the workload across multiple microservices.
-
-### 1. Technical Indicator Modules
-
-#### `oscillator.py`
 ```python
 import pandas as pd
 import numpy as np
 
-class StochasticOscillator:
-    def __init__(self, period=14):
-        self.period = period
-
-    def calculate(self, high_prices, low_prices, close_prices):
-        high = np.array(high_prices)
-        low = np.array(low_prices)
-        close = np.array(close_prices)
-
-        lowest_low = pd.Series(low).rolling(window=self.period, min_periods=self.period).min()
-        highest_high = pd.Series(high).rolling(window=self.period, min_periods=self.period).max()
-        k_percent = 100 * ((close - lowest_low) / (highest_high - lowest_low))
-        d_percent = k_percent.rolling(window=3).mean()
-
-        return k_percent, d_percent
-```
-
-### 2. Flask Microservices
-
-#### `microservice_1.py` (Producer)
-This service sends stock data to Kafka.
-
-```python
-from flask import Flask, request, jsonify
-from kafka import KafkaProducer
-import json
-import pandas as pd
-
-app = Flask(__name__)
-
-producer = KafkaProducer(bootstrap_servers='localhost:9092', value_serializer=lambda v: json.dumps(v).encode('utf-8'))
-
-@app.route('/send', methods=['POST'])
-def send_message():
-    data = request.get_json()
-    company_id = data.get('company_id')
-    file_path = data.get('file_path')
-    
-    # Read CSV file
-    df = pd.read_csv(file_path)
-    
-    # Send each row to Kafka
-    for _, row in df.iterrows():
-        message = row.to_dict()
-        message['company_id'] = company_id
-        producer.send('stock_topic', message)
-    
-    return jsonify({'status': 'Messages sent to Kafka'}), 200
-
-if __name__ == "__main__":
-    app.run(port=5001)
-```
-
-#### `microservice_2.py` (Consumer)
-This service receives stock data from Kafka and calculates the indicators.
-
-```python
-from flask import Flask, jsonify
-from kafka import KafkaConsumer
-from concurrent.futures import ThreadPoolExecutor
-import json
-import pandas as pd
-import numpy as np
-from oscillator import StochasticOscillator
-
-app = Flask(__name__)
-
-consumer = KafkaConsumer(
-    'stock_topic',
-    bootstrap_servers='localhost:9092',
-    auto_offset_reset='earliest',
-    enable_auto_commit=True,
-    group_id='my-group',
-    value_deserializer=lambda x: json.loads(x.decode('utf-8'))
-)
-
-executor = ThreadPoolExecutor(max_workers=10)
-results = []
-
-def calculate_indicators(data):
-    # Assuming data is a dictionary with keys: High, Low, Close, company_id
-    df = pd.DataFrame([data])
-    df['High'] = df['High'].astype(float)
-    df['Low'] = df['Low'].astype(float)
-    df['Close'] = df['Close'].astype(float)
-    
-    # Calculate Stochastic Oscillator
-    stochastic_oscillator = StochasticOscillator()
-    k_percent, d_percent = stochastic_oscillator.calculate(df['High'], df['Low'], df['Close'])
-    
-    result = {
-        'company_id': data['company_id'],
-        'Stochastic %K': k_percent.tolist(),
-        'Stochastic %D': d_percent.tolist()
-    }
-    return result
-
-@app.route('/receive', methods=['GET'])
-def receive_messages():
-    futures = []
-    for message in consumer:
-        data = message.value
-        futures.append(executor.submit(calculate_indicators, data))
+class SupertrendCalculator:
+    def __init__(self, data, period=14, multiplier=3):
+        """
+        Initializes the SupertrendCalculator with data, period, and multiplier.
         
-        if len(futures) >= 100:
-            break
+        :param data: A pandas DataFrame with columns 'High', 'Low', 'Close'.
+        :param period: The look-back period for ATR calculation.
+        :param multiplier: The multiplier for the ATR in Supertrend calculation.
+        """
+        self.data = data
+        self.period = period
+        self.multiplier = multiplier
+    
+    def calculate_atr(self):
+        """
+        Calculates the Average True Range (ATR).
+        
+        :return: A pandas Series with the ATR values.
+        """
+        high_low = self.data['High'] - self.data['Low']
+        high_close = np.abs(self.data['High'] - self.data['Close'].shift())
+        low_close = np.abs(self.data['Low'] - self.data['Close'].shift())
+        
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        atr = tr.rolling(self.period).mean()
+        
+        return atr
+    
+    def calculate_supertrend(self):
+        """
+        Calculates the Supertrend indicator.
+        
+        :return: A pandas Series with the Supertrend values.
+        """
+        atr = self.calculate_atr()
+        
+        hl2 = (self.data['High'] + self.data['Low']) / 2
+        upper_band = hl2 + (self.multiplier * atr)
+        lower_band = hl2 - (self.multiplier * atr)
+        
+        supertrend = pd.Series(index=self.data.index, dtype='float64')
+        in_uptrend = True
+        
+        for i in range(1, len(self.data)):
+            if self.data['Close'][i] > upper_band[i-1]:
+                in_uptrend = True
+            elif self.data['Close'][i] < lower_band[i-1]:
+                in_uptrend = False
+            
+            if in_uptrend:
+                supertrend[i] = lower_band[i]
+            else:
+                supertrend[i] = upper_band[i]
+        
+        return supertrend
 
-    global results
-    results = [future.result() for future in futures]
-    return jsonify(results), 200
-
-if __name__ == "__main__":
-    app.run(port=5002)
+# Example usage:
+# data = pd.read_csv('your_data.csv')  # Make sure your CSV has 'High', 'Low', 'Close' columns
+# stc = SupertrendCalculator(data)
+# supertrend_values = stc.calculate_supertrend()
+# print(supertrend_values)
 ```
 
-### 3. Install Dependencies
-Install the necessary Python packages using pip:
-```sh
-pip install flask kafka-python pandas numpy concurrent.futures
+This class now returns only the Supertrend values as a pandas Series. The Supertrend calculation logic has been streamlined, and the direction logic has been simplified and integrated into the Supertrend value assignment.
+
+To use this class, follow the same steps as before:
+
+```python
+import pandas as pd
+
+# Load your data into a DataFrame
+data = pd.read_csv('your_data.csv')  # Replace with your actual data file
+
+# Initialize the SupertrendCalculator
+stc = SupertrendCalculator(data)
+
+# Calculate the Supertrend
+supertrend_values = stc.calculate_supertrend()
+
+# Print the Supertrend values
+print(supertrend_values)
 ```
 
-### 4. Run the Microservices
-Start the two Flask microservices in separate terminal windows:
-
-```sh
-python microservice_1.py
-```
-
-```sh
-python microservice_2.py
-```
-
-### 5. Sending and Receiving Messages
-Send messages to `microservice_1` to distribute tasks to Kafka and calculate indicators using `microservice_2`.
-
-#### Send a message to `microservice_1`:
-```sh
-curl -X POST -H "Content-Type: application/json" -d '{"company_id": 1, "file_path": "data_company_a.csv"}' http://localhost:5001/send
-```
-
-#### Receive and calculate indicators from `microservice_2`:
-```sh
-curl http://localhost:5002/receive
-```
-
-### Notes:
-1. **Kafka Topics**: Ensure the Kafka topic (`stock_topic` in this example) exists. You can create it using Kafka CLI tools.
-2. **Kafka Configuration**: Adjust `bootstrap_servers` and other Kafka configurations as per your setup.
-3. **Parallel Processing**: The `ThreadPoolExecutor` is used for parallel processing. Adjust the `max_workers` parameter based on your system's capacity.
-4. **Scaling with Kubernetes**: For a production setup, consider using Kubernetes to deploy and manage multiple instances of your microservices for scalability and fault tolerance.
-5. **Load Balancing**: Use a load balancer to distribute incoming requests across multiple instances of your microservices.
-
-This setup allows you to handle more than 100 unique calculations simultaneously by distributing tasks across multiple instances of your microservices and processing them in parallel.
+This will give you a pandas Series containing the Supertrend values for each time period in your dataset.
